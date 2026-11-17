@@ -40,7 +40,12 @@ export function parseKv(body: string): Record<string, string> {
   return out;
 }
 
-const q = encodeURIComponent;
+/**
+ * A value as these cameras' CGIs take it: as typed, because they don't decode percent-escapes (a real camera
+ * stored `rtmp%3A%2F%2F…` literally). Only characters that would break the query are escaped; RTMP URLs and
+ * the module's stream keys never contain them.
+ */
+export const q = (v: string): string => v.replace(/[\s%&#+?"<>\\^`{|}\u0000-\u001f\u007f-\uffff]/g, (c) => encodeURIComponent(c));
 
 const panasonic: RtmpSetup = {
   models: 'Panasonic AW-UE4, AW-UE20 and AW-HE20 document it; other AW models may answer the same commands',

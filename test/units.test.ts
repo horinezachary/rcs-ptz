@@ -62,3 +62,12 @@ describe('module.json', () => {
     expect(m.name.length).toBeLessThanOrEqual(40);
   });
 });
+
+describe('camera CGI values', () => {
+  it('sends an RTMP address as typed (cameras store percent-escapes literally), escaping only what breaks a query', async () => {
+    const { q } = await import('../src/cameras/rtmp-setup.js');
+    expect(q('rtmp://10.0.3.117:1935/live')).toBe('rtmp://10.0.3.117:1935/live');
+    expect(q('rtmp://h/live/ab12_cd-3')).toBe('rtmp://h/live/ab12_cd-3');
+    expect(q('a&b c#d')).toBe('a%26b%20c%23d');
+  });
+});
