@@ -346,6 +346,13 @@ export class SimCamera {
     return h === 'Basic ' + Buffer.from(`${this.login.user}:${this.login.password}`).toString('base64');
   }
 
+  /** A query value exactly as sent: like the real cameras, the sim does not decode percent-escapes. */
+  private raw(req: http.IncomingMessage, name: string): string | null {
+    const q = (req.url ?? '').split('?')[1] ?? '';
+    const part = q.split('&').find((x) => x.startsWith(`${name}=`));
+    return part === undefined ? null : part.slice(name.length + 1);
+  }
+
   private onPanasonic(req: http.IncomingMessage, res: http.ServerResponse): void {
     const u = new URL(req.url ?? '/', 'http://x');
     const reply = (t: string, status = 200) => {
@@ -402,7 +409,7 @@ export class SimCamera {
     if (u.pathname === '/cgi-bin/set_rtmp_param') {
       if (this.login && !req.headers.authorization) return reply('', 401);
       const type = u.searchParams.get('type');
-      this.setRtmp({ url: u.searchParams.get('url') ?? '', key: type === '1' ? (u.searchParams.get('key') ?? '') : '' });
+      this.setRtmp({ url: this.raw(req, 'url') ?? '', key: type === '1' ? (this.raw(req, 'key') ?? '') : '' });
       this.cmd('panasonic', `RTMP ${this.rtmp.url} ${this.rtmp.key}`);
       return reply('OK');
     }
@@ -492,7 +499,7 @@ export class SimCamera {
     const u = new URL(req.url ?? '/', 'http://x');
     // Sony (SRG-XP1/XB25 CGI Command List): rtmp.cgi sets, inquiry.cgi?inqjs=rtmp reads.
     if (u.pathname === '/command/rtmp.cgi' && req.method === 'GET') {
-      const url = u.searchParams.get('RTMPURL');
+      const url = this.raw(req, 'RTMPURL');
       const en = u.searchParams.get('RTMPEnable');
       this.cmd('sony-cgi', `RTMP ${url ?? ''} ${en ?? ''}`.trim());
       this.setRtmp({ ...(url !== null ? { url, key: '' } : {}), ...(en === 'on' || en === 'off' ? { enabled: en === 'on' } : {}) });
@@ -504,7 +511,7 @@ export class SimCamera {
     }
     // PTZOptics (docs.ptzoptics.com HTTP API): POST param.cgi?post_network_other_conf&rtmp1_*=
     if (u.pathname === '/cgi-bin/param.cgi' && req.method === 'POST' && u.search.startsWith('?post_network_other_conf&')) {
-      const v = (k: string) => u.searchParams.get(k);
+      const v = (k: string) => this.raw(req, k);
       this.cmd('ptzoptics-cgi', `RTMP ${u.search.slice('?post_network_other_conf&'.length)}`);
       if (v('rtmp1_mrl') !== null) this.setRtmp({ url: v('rtmp1_mrl')! });
       if (v('rtmp1_key') !== null) this.setRtmp({ key: v('rtmp1_key')! });
