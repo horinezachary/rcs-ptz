@@ -88,6 +88,9 @@
       .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 12px; }
       .camcard .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
       .camcard .head .n { font-size: 18px; font-weight: 700; }
+      .camcard .rtmpset { display: flex; flex-direction: column; gap: 8px; }
+      .camcard .rtmpset:empty { display: none; }
+      .camcard .rtmpset .note { font-size: 13.5px; }
     </style>
   </head>
   <body>
@@ -536,6 +539,7 @@
         const proto = el('select');
         const host = el('input', { type: 'text' });
         const port = el('input', { type: 'number', min: 1, max: 65535 });
+        const webPort = el('input', { type: 'number', min: 1, max: 65535, placeholder: '80' });
         const vmode = el('select');
         vmode.append(el('option', { value: 'push' }, 'Camera pushes RTMP to this unit'), el('option', { value: 'pull' }, 'Pull from an address'), el('option', { value: 'none' }, 'No video'));
         const url = el('input', { type: 'text', placeholder: 'rtmp://server/live/stream' });
@@ -543,11 +547,13 @@
         const pass = el('input', { type: 'password', autocomplete: 'new-password' });
         const invP = el('rcs-toggle', { label: 'Invert pan' });
         const invT = el('rcs-toggle', { label: 'Invert tilt' });
-        for (const i of [name, host, port, url, user, pass]) i.oninput = () => (i.dataset.dirty = '1');
+        for (const i of [name, host, port, url, user, pass, webPort]) i.oninput = () => (i.dataset.dirty = '1');
         const fields = el('div', { class: 'fields' });
-        fields.append(f('Name', name), f('Make', brand), f('Control', proto), f('Address', host), f('Port (empty: usual)', port), f('Video', vmode));
+        const webRow = f('Web port, for the RTMP setting (empty: 80)', webPort);
+        fields.append(f('Name', name), f('Make', brand), f('Control', proto), f('Address', host), f('Port (empty: usual)', port), f('Video', vmode), webRow);
         const urlRow = f('Stream address', url);
         const push = el('div', { class: 'kv' });
+        const rtmpBox = el('div', { class: 'rtmpset' });
         const login = el('div', { class: 'fields' });
         login.append(f('Camera login: user', user), f('Password', pass));
         const inv = el('div', { class: 'row' });
@@ -555,20 +561,51 @@
         const l2 = el('label', { class: 'toggle' }); l2.append(invT, 'Invert tilt');
         inv.append(l1, l2);
         const acts = el('div', { class: 'row' });
-        root.append(head, fields, urlRow, push, login, inv, acts);
+        root.append(head, fields, urlRow, push, rtmpBox, login, inv, acts);
         const save = () => {
           for (const i of [name, host, port, url]) delete i.dataset.dirty;
           send({ type: 'edit', id: e.id, name: name.value, brand: brand.value, protocol: proto.value, host: host.value, port: port.value === '' ? '' : Number(port.value), video: { mode: vmode.value, url: url.value } });
         };
         for (const i of [name, host, port, url]) i.onchange = save;
+        webPort.onchange = () => { delete webPort.dataset.dirty; send({ type: 'edit', id: e.id, webPort: webPort.value === '' ? '' : Number(webPort.value) }); };
         brand.onchange = save;
         proto.onchange = save;
         vmode.onchange = () => { urlRow.hidden = vmode.value !== 'pull'; if (vmode.value !== 'pull') save(); };
         invP.addEventListener('change', (ev) => send({ type: 'edit', id: e.id, invertPan: !!ev.detail }));
         invT.addEventListener('change', (ev) => send({ type: 'edit', id: e.id, invertTilt: !!ev.detail }));
-        k = { root, head, name, brand, proto, host, port, vmode, url, urlRow, push, user, pass, invP, invT, acts };
+        k = { root, head, name, brand, proto, host, port, webPort, webRow, vmode, url, urlRow, push, rtmpBox, user, pass, invP, invT, acts };
         cards.set(e.id, k);
         return k;
+      }
+
+      /** The camera's own RTMP push setting: read it, or point the camera at this unit (asks first). */
+      function drawRtmpSetup(box, e) {
+        box.replaceChildren();
+        const r = e.rtmpSetup;
+        if (e.video.mode !== 'push' || !r) return;
+        if (!r.supported) {
+          box.append(el('p', { class: 'note' }, r.why));
+          return;
+        }
+        const kv = el('div', { class: 'kv' });
+        const read = r.read ? [r.read.url + (r.read.key ? ` · key ${r.read.key}` : ''), r.read.status || (r.read.enabled === true ? 'on' : r.read.enabled === false ? 'off' : '')].filter(Boolean).join(' · ') : '';
+        kv.append(
+          el('span', { class: 'k' }, 'Camera’s own setting'),
+          el('span', { class: 'url' }, r.busy === 'reading' ? 'reading…' : read || (r.readable ? 'not read yet' : 'this model can’t report it'))
+        );
+        box.append(kv);
+        if (r.error) box.append(el('p', { class: 'note', style: 'color: var(--rcs-error)' }, r.error));
+        else if (r.done) box.append(el('p', { class: 'note', style: 'color: var(--rcs-ok)' }, r.done));
+        const why = !s.allowControls ? 'Turn on Allow controls to set it.' : !e.login ? 'Save the camera’s login (an admin user) below to set it.' : '';
+        const row = el('div', { class: 'row' });
+        if (r.readable) row.append(btn('Read from camera', undefined, () => send({ type: 'rtmp-read', id: e.id }), !!r.busy));
+        row.append(
+          btn(r.busy === 'setting' ? 'Setting…' : 'Point camera at this unit', 'primary', () =>
+            ask(`Set ${e.name} to push its picture to ${r.target}? This changes a setting on the camera, using its saved login, and restarts the camera’s RTMP stream.`, 'Set camera', () => send({ type: 'rtmp-point', id: e.id, confirmed: true })),
+            !!r.busy || !!why)
+        );
+        box.append(row);
+        box.append(el('p', { class: 'note' }, why || r.models));
       }
 
       function drawSetup() {
@@ -616,6 +653,9 @@
             k.push.append(el('span', { class: 'k' }, 'Set the camera to push RTMP to'), el('span', { class: 'url' }, e.url));
             k.push.append(el('span', { class: 'k' }, 'Now'), el('span', { class: 'v' }, e.pushingFrom ? `receiving from ${e.pushingFrom}` : 'nothing arriving'));
           }
+          k.webRow.hidden = !['sony', 'ptzoptics'].includes(e.brand);
+          val(k.webPort, e.webPort || '');
+          drawRtmpSetup(k.rtmpBox, e);
           k.user.placeholder = e.login ? 'set (kept as a secret)' : 'none';
           k.acts.replaceChildren(
             btn('Save login', undefined, () => { send({ type: 'credentials', id: e.id, user: k.user.value, password: k.pass.value }); k.user.value = k.pass.value = ''; }),
