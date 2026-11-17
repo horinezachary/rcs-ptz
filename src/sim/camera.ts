@@ -4,6 +4,7 @@
 // move is on, keeps presets and picture settings, and records every command (inquiries are not commands).
 // Nothing here talks to real equipment.
 
+import crypto from 'node:crypto';
 import dgram from 'node:dgram';
 import http from 'node:http';
 import net from 'node:net';
@@ -22,6 +23,15 @@ export interface SimPorts {
   panasonic: number;
   onvif: number;
   birddog: number;
+  /** Sony and PTZOptics web CGI (the RTMP setting), with Digest login. */
+  web: number;
+}
+
+/** The camera's own RTMP push setting, as the web APIs set it. */
+export interface SimRtmp {
+  url: string;
+  key: string;
+  enabled: boolean;
 }
 
 export class SimCamera {
@@ -48,6 +58,10 @@ export class SimCamera {
   inquiries = 0;
   /** Basic auth for Panasonic and WS-Security for ONVIF, when set. */
   login: { user: string; password: string } | null = null;
+  /** The camera's RTMP push destination. */
+  rtmp: SimRtmp = { url: '', key: '', enabled: false };
+  /** Called when the RTMP destination changes and streaming is on, with the full push URL. */
+  onRtmp: ((url: string) => void) | null = null;
 
   private udp: dgram.Socket | null = null;
   private tcp: net.Server | null = null;
@@ -93,10 +107,12 @@ export class SimCamera {
     const http1 = http.createServer((q, s) => this.onPanasonic(q, s));
     const http2 = http.createServer((q, s) => void this.onOnvif(q, s));
     const http3 = http.createServer((q, s) => this.onBirddog(q, s));
+    const http4 = http.createServer((q, s) => this.onWeb(q, s));
     for (const [srv, p] of [
       [http1, ports.panasonic],
       [http2, ports.onvif],
-      [http3, ports.birddog]
+      [http3, ports.birddog],
+      [http4, ports.web]
     ] as const) {
       await new Promise<void>((res) => srv.listen(p ?? 0, host, () => res()));
       this.httpServers.push(srv);
@@ -106,7 +122,8 @@ export class SimCamera {
       viscaTcp: (tcp.address() as AddressInfo).port,
       panasonic: (http1.address() as AddressInfo).port,
       onvif: (http2.address() as AddressInfo).port,
-      birddog: (http3.address() as AddressInfo).port
+      birddog: (http3.address() as AddressInfo).port,
+      web: (http4.address() as AddressInfo).port
     };
   }
 
@@ -381,6 +398,23 @@ export class SimCamera {
       }
       return reply('ER1:' + m);
     }
+    // RTMP push (AW-UE4/UE20/HE20 supplement): set and read need the admin login, start/stop/status are Live.
+    if (u.pathname === '/cgi-bin/set_rtmp_param') {
+      if (this.login && !req.headers.authorization) return reply('', 401);
+      const type = u.searchParams.get('type');
+      this.setRtmp({ url: u.searchParams.get('url') ?? '', key: type === '1' ? (u.searchParams.get('key') ?? '') : '' });
+      this.cmd('panasonic', `RTMP ${this.rtmp.url} ${this.rtmp.key}`);
+      return reply('OK');
+    }
+    if (u.pathname === '/cgi-bin/get_rtmp_param') return (this.inquiries++, reply(`type=1\r\nurl=${this.rtmp.url}\r\nkey=${this.rtmp.key}\r\n`));
+    if (u.pathname === '/cgi-bin/get_rtmp_status') return (this.inquiries++, reply(`status=${this.rtmp.enabled ? 1 : 0}\r\n`));
+    if (u.pathname === '/cgi-bin/rtmp_ctrl') {
+      const c2 = u.searchParams.get('cmd');
+      if (c2 !== 'start' && c2 !== 'stop') return reply('', 400);
+      this.cmd('panasonic', `RTMP ${c2}`);
+      this.setRtmp({ enabled: c2 === 'start' });
+      return reply('OK');
+    }
     if (u.pathname === '/cgi-bin/aw_cam') {
       const q: Record<string, () => string> = {
         QID: () => `OID:${this.model}`,
@@ -423,6 +457,62 @@ export class SimCamera {
   }
 
   // ---- BirdDog ------------------------------------------------------------------------------------
+
+  // ---- Sony and PTZOptics web CGI (RTMP only) ---------------------------------------------------------
+
+  private setRtmp(change: Partial<SimRtmp>): void {
+    const before = JSON.stringify(this.rtmp);
+    this.rtmp = { ...this.rtmp, ...change };
+    if (JSON.stringify(this.rtmp) !== before && this.rtmp.enabled && this.rtmp.url) {
+      this.onRtmp?.(this.rtmp.key ? `${this.rtmp.url.replace(/\/$/, '')}/${this.rtmp.key}` : this.rtmp.url);
+    }
+  }
+
+  private readonly nonce = crypto.randomBytes(8).toString('hex');
+
+  /** HTTP Digest (MD5, qop=auth), as Sony and PTZOptics cameras ask. */
+  private digestOk(req: http.IncomingMessage): boolean {
+    if (!this.login) return true;
+    const h = req.headers.authorization ?? '';
+    if (!/^Digest /i.test(h)) return false;
+    const p: Record<string, string> = {};
+    for (const m of h.slice(7).matchAll(/(\w+)=(?:"([^"]*)"|([^,\s]*))/g)) p[m[1]!] = m[2] ?? m[3] ?? '';
+    const md5 = (s: string) => crypto.createHash('md5').update(s).digest('hex');
+    const ha1 = md5(`${this.login.user}:sim:${this.login.password}`);
+    const ha2 = md5(`${req.method}:${p.uri}`);
+    return p.username === this.login.user && p.uri === req.url && p.nonce === this.nonce && p.response === md5(`${ha1}:${this.nonce}:${p.nc}:${p.cnonce}:${p.qop}:${ha2}`);
+  }
+
+  private onWeb(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const reply = (t: string, status = 200) => {
+      res.writeHead(status, status === 401 ? { 'WWW-Authenticate': `Digest realm="sim", nonce="${this.nonce}", qop="auth"` } : { 'Content-Type': 'text/plain' });
+      res.end(t);
+    };
+    if (!this.digestOk(req)) return reply('', 401);
+    const u = new URL(req.url ?? '/', 'http://x');
+    // Sony (SRG-XP1/XB25 CGI Command List): rtmp.cgi sets, inquiry.cgi?inqjs=rtmp reads.
+    if (u.pathname === '/command/rtmp.cgi' && req.method === 'GET') {
+      const url = u.searchParams.get('RTMPURL');
+      const en = u.searchParams.get('RTMPEnable');
+      this.cmd('sony-cgi', `RTMP ${url ?? ''} ${en ?? ''}`.trim());
+      this.setRtmp({ ...(url !== null ? { url, key: '' } : {}), ...(en === 'on' || en === 'off' ? { enabled: en === 'on' } : {}) });
+      return reply('');
+    }
+    if (u.pathname === '/command/inquiry.cgi' && u.searchParams.get('inqjs') === 'rtmp') {
+      this.inquiries++;
+      return reply(`var RTMPURL="${this.rtmp.url}";\nvar RTMPEnable="${this.rtmp.enabled ? 'on' : 'off'}";\nvar RTMPStatus="${this.rtmp.enabled ? 'Connection success' : 'RTMP disable'}";\n`);
+    }
+    // PTZOptics (docs.ptzoptics.com HTTP API): POST param.cgi?post_network_other_conf&rtmp1_*=
+    if (u.pathname === '/cgi-bin/param.cgi' && req.method === 'POST' && u.search.startsWith('?post_network_other_conf&')) {
+      const v = (k: string) => u.searchParams.get(k);
+      this.cmd('ptzoptics-cgi', `RTMP ${u.search.slice('?post_network_other_conf&'.length)}`);
+      if (v('rtmp1_mrl') !== null) this.setRtmp({ url: v('rtmp1_mrl')! });
+      if (v('rtmp1_key') !== null) this.setRtmp({ key: v('rtmp1_key')! });
+      if (v('rtmp1_en') !== null) this.setRtmp({ enabled: v('rtmp1_en') === '1' });
+      return reply('');
+    }
+    reply('', 404);
+  }
 
   private onBirddog(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (req.url === '/about') {

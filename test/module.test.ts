@@ -53,7 +53,7 @@ async function camera(name = 'Cam A') {
 const PORT_OF: Record<Protocol, keyof SimPorts> = { 'visca-udp': 'viscaUdp', 'visca-tcp': 'viscaTcp', panasonic: 'panasonic', onvif: 'onvif' };
 
 function entry(id: string, ports: SimPorts, protocol: Protocol = 'visca-udp', brand: Brand = 'sony', video: Entry['video'] = { mode: 'none', url: '', key: id }): Entry {
-  return { id, name: `Cam ${id.slice(-1)}`, brand, protocol, host: '127.0.0.1', port: ports[PORT_OF[protocol]], video, invertPan: false, invertTilt: false, presetNames: [] };
+  return { id, name: `Cam ${id.slice(-1)}`, brand, protocol, host: '127.0.0.1', port: ports[PORT_OF[protocol]], video, invertPan: false, invertTilt: false, presetNames: [], webPort: 0 };
 }
 
 async function start(cameras: Entry[], extra: { allow?: boolean; state?: State; reason?: 'boot' | 'restore' | 'user'; rtmpPort?: number; bridge?: Config['bridge']; secrets?: Record<string, unknown> } = {}) {
@@ -432,5 +432,84 @@ describe('scan network', () => {
     await s.sendUi({ type: 'add-found', host: '127.0.0.1' });
     expect(s.config.cameras).toHaveLength(1);
     expect(last().scan.found[0].added).toBe(true);
+  });
+});
+
+describe('pointing a camera’s own RTMP push at the unit', () => {
+  const LOGIN = { user: 'admin', password: 'pw9' };
+
+  async function pointable(brand: 'panasonic' | 'sony' | 'ptzoptics', allow = true, withLogin = true) {
+    const { c, ports } = await camera();
+    c.login = LOGIN;
+    const protocol: Protocol = brand === 'panasonic' ? 'panasonic' : 'visca-udp';
+    const e = { ...entry('00000001', ports, protocol, brand, { mode: 'push', url: '', key: 'stagecam' }), webPort: ports.web };
+    const rtmpPort = await freePort();
+    const s = await start([e], { allow, rtmpPort, secrets: withLogin ? { cams: { '00000001': LOGIN } } : {} });
+    return { c, s, rtmpPort };
+  }
+  const rtmpCommands = (c: SimCamera) => c.commands.filter((x) => x.what.startsWith('RTMP'));
+
+  it.each(['panasonic', 'sony', 'ptzoptics'] as const)('%s: sets the push to this unit only once confirmed, with the camera’s login', async (brand) => {
+    const { c, s, rtmpPort } = await pointable(brand);
+    expect(last().entries[0].rtmpSetup).toMatchObject({ supported: true, target: `rtmp://127.0.0.1:${rtmpPort}/live/stagecam` });
+    await wait(300);
+    expect(rtmpCommands(c)).toEqual([]); // starting only reads
+    await s.sendUi({ type: 'rtmp-point', id: '00000001', from: 'web' }); // not confirmed: nothing
+    await s.settle();
+    expect(rtmpCommands(c)).toEqual([]);
+    await s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
+    await until(() => !!last()?.entries[0].rtmpSetup.done, 4000, 'for the set');
+    const pushTo = brand === 'sony' ? c.rtmp.url : `${c.rtmp.url}/${c.rtmp.key}`;
+    expect(pushTo).toBe(`rtmp://127.0.0.1:${rtmpPort}/live/stagecam`);
+    expect(c.rtmp.enabled).toBe(true);
+    if (brand !== 'ptzoptics') expect(last().entries[0].rtmpSetup.read).toMatchObject({ enabled: true });
+    expect(s.logs.some((l) => /set the camera to push RTMP/.test(l.text))).toBe(true);
+    expect(JSON.stringify(last())).not.toMatch(/pw9/);
+  });
+
+  it('then the camera’s picture arrives at the unit', async () => {
+    const { c, s } = await pointable('panasonic');
+    let pusher: SimPusher | null = null;
+    c.onRtmp = (url) => {
+      pusher = new SimPusher(url);
+      pusher.start();
+    };
+    cleanups.push(() => pusher?.stop());
+    await s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
+    await until(() => camView('00000001')?.stream.live, 5000, 'for the stream');
+  });
+
+  it('reads the camera’s current setting without changing it', async () => {
+    const { c, s } = await pointable('sony', false);
+    c.rtmp = { url: 'rtmp://elsewhere/live/abc', key: '', enabled: true };
+    await s.sendUi({ type: 'rtmp-read', id: '00000001', from: 'web' });
+    await until(() => !!last()?.entries[0].rtmpSetup.read, 3000, 'for the read');
+    expect(last().entries[0].rtmpSetup.read).toMatchObject({ url: 'rtmp://elsewhere/live/abc', enabled: true, status: 'Connection success' });
+    expect(rtmpCommands(c)).toEqual([]);
+  });
+
+  it('refuses without Allow controls or a saved login, and says why for BirdDog', async () => {
+    const off = await pointable('panasonic', false);
+    await off.s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
+    await off.s.settle();
+    expect(rtmpCommands(off.c)).toEqual([]);
+    expect(off.s.notifications.at(-1)?.text).toMatch(/Allow controls/);
+    await sim!.close();
+    sim = null;
+
+    const nologin = await pointable('ptzoptics', true, false);
+    await nologin.s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
+    await nologin.s.settle();
+    expect(rtmpCommands(nologin.c)).toEqual([]);
+    expect(nologin.s.notifications.at(-1)?.text).toMatch(/login/);
+    await sim!.close();
+    sim = null;
+
+    const { ports } = await camera();
+    const s = await start([entry('00000001', ports, 'visca-udp', 'birddog', { mode: 'push', url: '', key: 'stagecam' })], { allow: true });
+    expect(last().entries[0].rtmpSetup).toMatchObject({ supported: false, why: expect.stringMatching(/BirdDog/) });
+    await s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
+    await s.settle();
+    expect(s.notifications.at(-1)?.text).toMatch(/BirdDog/);
   });
 });

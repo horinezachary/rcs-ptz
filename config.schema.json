@@ -26,6 +26,7 @@
           },
           "invertPan": { "type": "boolean" },
           "invertTilt": { "type": "boolean" },
+          "webPort": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "Sony/PTZOptics web port for the RTMP setting; 0: 80" },
           "presetNames": { "type": "array", "maxItems": 16, "items": { "type": "string", "maxLength": 24 } }
         },
         "required": ["id", "host", "protocol"],

@@ -89,6 +89,24 @@ streams will load it heavily. Set the cameras' secondary (low-resolution) stream
 video to "selected camera only" or "none". The web view always shows video (the browser's own machine decodes it).
 H.265 over Enhanced RTMP is detected and shown as unsupported.
 
+### Pointing a camera at the unit
+
+For cameras whose web API can set their RTMP push, a camera's Setup card in the web view has **Point camera at
+this unit**. It sets the camera's RTMP destination to `rtmp://<the unit's address on the camera's network>:1935/live/<stream key>`
+and turns its RTMP stream on. It is a command to the camera, so it asks first, needs Allow controls on, and uses the
+camera's saved login (an admin user). **Read from camera** shows the camera's current setting without changing it.
+
+| Make | How | Documented for | Read back |
+| --- | --- | --- | --- |
+| Panasonic | `/cgi-bin/rtmp_ctrl?cmd=stop`, `set_rtmp_param?type=1&url=&key=`, `rtmp_ctrl?cmd=start` (Basic login) | AW-UE4, AW-UE20, AW-HE20 | `get_rtmp_param`, `get_rtmp_status` |
+| Sony | `/command/rtmp.cgi?RTMPURL=<url with key>&RTMPEnable=on` (Digest login, web port 80) | SRG-XP1, SRG-XB25 | `inquiry.cgi?inqjs=rtmp` |
+| PTZOptics | `POST /cgi-bin/param.cgi?post_network_other_conf&rtmp1_mrl=` / `rtmp1_key=` / `rtmp1_en=1` (Digest, port 80) | Move 4K, Link 4K, Move SE, Studio Pro | not documented |
+| BirdDog, ONVIF, generic VISCA | Not possible: BirdDog's API has no RTMP settings, and ONVIF and VISCA have no command for a push address. Set it in the camera's web page. | | |
+
+Other models of these makes may answer the same commands (the BRC-X400 and AW-UE150 list RTMP commands too,
+but their exact names weren't checkable), and none has been tried on a real camera yet. The Sony and PTZOptics web
+port is set on the card (empty: 80).
+
 ## RTMP to ONVIF bridge
 
 Off by default. When on, every camera appears on the network as its own ONVIF Profile S camera:

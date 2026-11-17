@@ -20,10 +20,11 @@
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import { defineModule, type Ctx, type KeySetParams } from '@rcs/module-sdk';
-import { OnvifBridge, type BridgeAction, type BridgeCamera } from './bridge/onvif.js';
+import { OnvifBridge, type BridgeAction, type BridgeCamera, localFor } from './bridge/onvif.js';
 import { RtspServer } from './bridge/rtsp.js';
 import { Camera, type CameraEntry, type VideoMode, portOf } from './camera.js';
 import { BRANDS, type Brand, type Credentials, type Param, PROTOCOLS, type Protocol, clamp } from './cameras/types.js';
+import { rtmpSetupFor, rtmpSetupMissing, type RtmpSetting } from './cameras/rtmp-setup.js';
 import { scan, type Found } from './discovery.js';
 import { RTMP_APP, RtmpServer } from './rtmp/server.js';
 import { VideoHub } from './video/hub.js';
@@ -46,6 +47,17 @@ export interface State {
 export interface Entry extends CameraEntry {
   /** Names for presets 1-16: the module's own labels (cameras don't store names). */
   presetNames: string[];
+  /** The camera's web (HTTP) port for Sony and PTZOptics, where the RTMP setting lives. 0: 80. */
+  webPort: number;
+}
+
+/** What the module last learned about a camera's own RTMP setting, and what it is doing about it. */
+interface RtmpInfo {
+  busy: '' | 'reading' | 'setting';
+  read: RtmpSetting | null;
+  error: string;
+  /** After a successful set. */
+  done: string;
 }
 
 export interface Config {
@@ -109,6 +121,7 @@ interface Runtime {
   pictureViewers: Map<string, string>;
   lastError: Map<string, number>;
   refused: string;
+  rtmpInfo: Map<string, RtmpInfo>;
 }
 let rt: Runtime | null = null;
 
@@ -137,7 +150,8 @@ function cleanEntry(e: any): Entry | null {
     video: { mode, url: typeof v.url === 'string' ? v.url.trim().slice(0, 500) : '', key: typeof v.key === 'string' && /^[A-Za-z0-9_-]{4,64}$/.test(v.key) ? v.key : e.id },
     invertPan: !!e.invertPan,
     invertTilt: !!e.invertTilt,
-    presetNames: names
+    presetNames: names,
+    webPort: Number.isInteger(e.webPort) && e.webPort >= 0 && e.webPort <= 65535 ? e.webPort : 0
   };
 }
 
@@ -197,7 +211,7 @@ export function snapshot(ctx: C, clientId?: string) {
     speed: speed(ctx),
     keyMode: keyMode(ctx),
     current: cur?.entry.id ?? '',
-    entries: c.cameras.map((e) => ({ ...e, login: login(e.id), url: e.video.mode === 'push' ? `rtmp://${ip}:${c.rtmpPort}/${RTMP_APP}/${e.video.key}` : e.video.url, pushingFrom: publishing.get(e.video.key) ?? '' })),
+    entries: c.cameras.map((e) => ({ ...e, login: login(e.id), url: e.video.mode === 'push' ? `rtmp://${ip}:${c.rtmpPort}/${RTMP_APP}/${e.video.key}` : e.video.url, pushingFrom: publishing.get(e.video.key) ?? '', rtmpSetup: rtmpSetupView(ctx, e) })),
     cameras: [...(rt?.cameras.values() ?? [])].map((cam) => {
       const v = cam.snapshot();
       return { ...v, picture: cam === cur || (clientId && rt?.pictureViewers.get(clientId) === v.id) ? v.picture : [], motion: motionOf(v.id) };
@@ -454,7 +468,7 @@ async function addCamera(ctx: C, m: any): Promise<void> {
   const name = typeof m.name === 'string' && m.name.trim() ? m.name.trim().slice(0, 32) : `Camera ${c.cameras.length + 1}`;
   const video = videoOf(m.video, newKey());
   if (typeof video === 'string') return ctx.notify(video, 'warning');
-  const e: Entry = { id, name, brand, protocol, host, port, video, invertPan: false, invertTilt: false, presetNames: [] };
+  const e: Entry = { id, name, brand, protocol, host, port, video, invertPan: false, invertTilt: false, presetNames: [], webPort: 0 };
   await ctx.setConfig({ ...c, cameras: [...c.cameras, e] });
   await ctx.log('info', `Added camera ${name} (${host}, ${PROTOCOLS[protocol].label})`);
   await sync(ctx);
@@ -493,6 +507,11 @@ async function editCamera(ctx: C, m: any): Promise<void> {
     const v = videoOf(m.video, m.video.newKey ? newKey() : e.video.key);
     if (typeof v === 'string') return ctx.notify(v, 'warning');
     next.video = v;
+  }
+  if (m.webPort !== undefined) {
+    const p = m.webPort === '' || m.webPort === null ? 0 : Number(m.webPort);
+    if (!Number.isInteger(p) || p < 0 || p > 65535) return ctx.notify('Port must be 1 to 65535, or empty for 80', 'warning');
+    next.webPort = p;
   }
   if (typeof m.invertPan === 'boolean') next.invertPan = m.invertPan;
   if (typeof m.invertTilt === 'boolean') next.invertTilt = m.invertTilt;
@@ -615,6 +634,98 @@ function scanPorts() {
 }
 
 // ---- operator actions: the only things that change a camera ---------------------------------------
+
+// ---- the camera's own RTMP push setting ----
+
+/** Where this camera should push: the unit's address on the camera's network, and the camera's stream key. */
+function rtmpTarget(ctx: C, e: Entry): { server: string; key: string } {
+  const ip = /^127\./.test(e.host) || e.host === 'localhost' ? '127.0.0.1' : localFor(e.host);
+  return { server: `rtmp://${ip}:${cfg(ctx).rtmpPort}/${RTMP_APP}`, key: e.video.key };
+}
+
+const webPortOf = (e: Entry) => (e.brand === 'panasonic' ? portOf(e) : e.webPort || 80);
+
+function rtmpSetupView(ctx: C, e: Entry) {
+  const setup = rtmpSetupFor(e.brand);
+  const info = rt?.rtmpInfo.get(e.id);
+  const t = rtmpTarget(ctx, e);
+  return {
+    supported: !!setup,
+    why: setup ? '' : rtmpSetupMissing(e.brand),
+    models: setup?.models ?? '',
+    readable: setup?.readable ?? false,
+    target: `${t.server}/${t.key}`,
+    webPort: webPortOf(e),
+    busy: info?.busy ?? '',
+    read: info?.read ?? null,
+    error: info?.error ?? '',
+    done: info?.done ?? ''
+  };
+}
+
+function rtmpInfo(id: string): RtmpInfo {
+  let i = rt!.rtmpInfo.get(id);
+  if (!i) rt!.rtmpInfo.set(id, (i = { busy: '', read: null, error: '', done: '' }));
+  return i;
+}
+
+/** Reads the camera's own RTMP setting (a read: no Allow controls needed). */
+async function readCameraRtmp(ctx: C, id: unknown): Promise<void> {
+  const e = cfg(ctx).cameras.find((x) => x.id === id);
+  const setup = e && rtmpSetupFor(e.brand);
+  if (!rt || !e || !setup?.readable) return;
+  const info = rtmpInfo(e.id);
+  if (info.busy) return;
+  info.busy = 'reading';
+  info.error = '';
+  await draw(ctx);
+  try {
+    info.read = await setup.read(e.host, webPortOf(e), creds(ctx, e.id));
+  } catch (err) {
+    info.error = `Could not read the camera’s RTMP setting: ${(err as Error).message}`;
+  }
+  info.busy = '';
+  await draw(ctx);
+}
+
+/**
+ * Sets the camera's RTMP push to this unit. A command to the camera: the web view asks first and sends
+ * confirmed: true, Allow controls must be on, and the camera's login must be saved.
+ */
+async function pointCameraRtmp(ctx: C, m: any, who: string): Promise<void> {
+  const e = cfg(ctx).cameras.find((x) => x.id === m.id);
+  if (!rt || !e) return;
+  const setup = rtmpSetupFor(e.brand);
+  if (!setup) return ctx.notify(`${e.name}: ${rtmpSetupMissing(e.brand)}`, 'warning');
+  if (m.confirmed !== true) return;
+  if (!allowed(ctx)) return;
+  if (e.video.mode !== 'push') return ctx.notify(`${e.name}: set Video to “Camera pushes RTMP to this unit” first`, 'warning');
+  const login = creds(ctx, e.id);
+  if (!login) return ctx.notify(`${e.name}: save the camera’s login (an admin user) first`, 'warning');
+  const info = rtmpInfo(e.id);
+  if (info.busy) return;
+  const t = rtmpTarget(ctx, e);
+  info.busy = 'setting';
+  info.error = info.done = '';
+  await draw(ctx);
+  try {
+    await setup.set(e.host, webPortOf(e), login, t.server, t.key);
+    await ctx.log('info', `${e.name}: set the camera to push RTMP to ${t.server}/${t.key} (${who})`);
+    info.done = `Set to ${t.server}/${t.key}`;
+    if (setup.readable) {
+      try {
+        info.read = await setup.read(e.host, webPortOf(e), login);
+      } catch {}
+    }
+    await ctx.notify(`${e.name}: the camera now pushes to this unit`, 'info');
+  } catch (err) {
+    info.error = `Could not set the camera’s RTMP push: ${(err as Error).message}`;
+    await ctx.log('warning', `${e.name}: ${info.error}`);
+    await ctx.notify(`${e.name}: ${info.error}`, 'error');
+  }
+  info.busy = '';
+  await draw(ctx);
+}
 
 function allowed(ctx: C, quietly = false): boolean {
   if (cfg(ctx).allowControls) return true;
@@ -885,7 +996,8 @@ export default defineModule<State, Config>({
       scan: { running: false, found: [], error: '', at: 0, target: '' },
       pictureViewers: new Map(),
       lastError: new Map(),
-      refused: ''
+      refused: '',
+      rtmpInfo: new Map()
     };
     rtmp.on('publish', () => soon(ctx));
     rtmp.on('unpublish', () => soon(ctx));
@@ -1115,6 +1227,10 @@ export default defineModule<State, Config>({
         return removeCamera(ctx, m.id);
       case 'credentials':
         return setCredentials(ctx, m);
+      case 'rtmp-read':
+        return readCameraRtmp(ctx, m.id);
+      case 'rtmp-point':
+        return pointCameraRtmp(ctx, m, who);
       case 'preset-name':
         return setPresetName(ctx, m);
       case 'allow':
