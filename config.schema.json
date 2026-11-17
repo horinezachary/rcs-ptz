@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "cameras": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{8}$" },
+          "name": { "type": "string", "maxLength": 32 },
+          "brand": { "enum": ["sony", "birddog", "panasonic", "ptzoptics", "visca", "onvif"] },
+          "protocol": { "enum": ["visca-udp", "visca-tcp", "panasonic", "onvif"] },
+          "host": { "type": "string", "minLength": 1, "maxLength": 253 },
+          "port": { "type": "integer", "minimum": 0, "maximum": 65535, "description": "0: the protocol's usual port" },
+          "video": {
+            "type": "object",
+            "properties": {
+              "mode": { "enum": ["push", "pull", "none"] },
+              "url": { "type": "string", "maxLength": 500 },
+              "key": { "type": "string", "pattern": "^[A-Za-z0-9_-]{4,64}$" }
+            },
+            "required": ["mode"],
+            "additionalProperties": false
+          },
+          "invertPan": { "type": "boolean" },
+          "invertTilt": { "type": "boolean" },
+          "presetNames": { "type": "array", "maxItems": 16, "items": { "type": "string", "maxLength": 24 } }
+        },
+        "required": ["id", "host", "protocol"],
+        "additionalProperties": false
+      }
+    },
+    "allowControls": { "type": "boolean" },
+    "liveVideo": { "enum": ["all", "selected", "off"] },
+    "rtmpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "bridge": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "basePort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "rtspPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "discovery": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
