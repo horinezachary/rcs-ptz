@@ -1,0 +1,7 @@
+{
+  "cameras": [],
+  "allowControls": false,
+  "liveVideo": "all",
+  "rtmpPort": 1935,
+  "bridge": { "enabled": false, "basePort": 8000, "rtspPort": 8554, "discovery": true }
+}
