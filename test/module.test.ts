@@ -4,7 +4,7 @@
 import net from 'node:net';
 import { startTestModule, type TestModule } from '@rcs/module-sdk/testing';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import mod, { KEY, UI_HOLD_MS, type Config, type Entry, type State } from '../src/index.js';
+import mod, { KEY, layout, UI_HOLD_MS, type Config, type Entry, type State } from '../src/index.js';
 import { OnvifDriver } from '../src/cameras/onvif.js';
 import type { Protocol, Brand } from '../src/cameras/types.js';
 import { SimCamera, type SimPorts } from '../src/sim/camera.js';
@@ -515,24 +515,26 @@ describe('pointing a camera’s own RTMP push at the unit', () => {
 });
 
 describe('a larger Stream Deck', () => {
-  it('keeps the 15 keys top left, picks cameras on the right and recalls presets below', async () => {
+  it('keeps the 15 keys top left, picks cameras on the bottom row and recalls presets on the right', async () => {
     const a = await camera('A');
     const b = await camera('B');
     const s = await start([entry('0000000a', a.ports), entry('0000000b', b.ports)], { allow: true, deck: { columns: 8, rows: 4 } });
     expect(s.keys).toHaveLength(32);
     expect(s.keys[1]).toMatchObject({ label: '▲' });
     expect(s.keys[20]).toMatchObject({ label: 'MODE' }); // block key 15 at column 5, row 3 of the deck
-    expect(s.keys[5]).toMatchObject({ label: 'CAM A', sublabel: 'SELECTED' });
-    expect(s.keys[6]).toMatchObject({ label: 'CAM B' });
-    expect(s.keys[24]).toMatchObject({ label: 'PRESET 1' });
+    expect(s.keys[24]).toMatchObject({ label: 'CAM A', sublabel: 'SELECTED' });
+    expect(s.keys[25]).toMatchObject({ label: 'CAM B' });
+    expect(s.keys[26]).toEqual({}); // no third camera
+    // Presets: 4 rows of 3 on the right, row by row.
+    expect([5, 6, 7, 13, 31].map((k) => s.keys[k]?.label)).toEqual(['PRESET 1', 'PRESET 2', 'PRESET 3', 'PRESET 4', 'PRESET 12']);
 
     await s.down(8); // ◀ at column 0, row 1
     await until(() => a.c.vel.pan < 0, 2000, 'for the move');
-    await s.press(6); // camera B: the move on A stops
+    await s.press(25); // camera B: the move on A stops
     expect(s.state.cam).toBe('0000000b');
     await until(() => a.c.vel.pan === 0, 2000, 'for the stop');
     await s.up(8);
-    await s.press(25);
+    await s.press(6);
     expect(moves(b.c)).toContain('recall 2');
     expect(moves(a.c)).not.toContain('recall 2');
 
@@ -544,5 +546,24 @@ describe('a larger Stream Deck', () => {
     expect(s.keys).toHaveLength(15);
     expect(s.keys[KEY.MODE]).toMatchObject({ label: 'MODE' });
     expect(s.keys[KEY.CAM]).toMatchObject({ label: 'CAM B' });
+  });
+});
+
+describe('the larger deck layout', () => {
+  it('puts up to 5 cameras under the 15 keys and 4 rows of presets on the right', () => {
+    const L = layout({ columns: 8, rows: 4 }, 5);
+    expect(L.cameras).toEqual([24, 25, 26, 27, 28]);
+    expect(L.presets).toEqual([5, 6, 7, 13, 14, 15, 21, 22, 23, 29, 30, 31]);
+  });
+
+  it('runs the camera row the whole width with more than 5 cameras, and keeps 3 rows of presets', () => {
+    const L = layout({ columns: 8, rows: 4 }, 6);
+    expect(L.cameras).toEqual([24, 25, 26, 27, 28, 29, 30, 31]);
+    expect(L.presets).toEqual([5, 6, 7, 13, 14, 15, 21, 22, 23]);
+    expect(layout({ columns: 9, rows: 4 }, 2).presets).toHaveLength(16); // + XL: 4 rows of 4
+  });
+
+  it('adds nothing on a 15-key deck', () => {
+    expect(layout({ columns: 5, rows: 3 }, 8)).toMatchObject({ cameras: [], presets: [] });
   });
 });

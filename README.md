@@ -62,10 +62,11 @@ A move lasts while the key is held. FOCUS NEAR/FAR switch an autofocus camera to
 **Picture**: the top row raises iris, gain, shutter, R gain and B gain, the middle row lowers them; the bottom row
 cycles AE mode and white balance, runs one-push white balance and toggles autofocus.
 
-On a larger deck (an XL, 8×4, or a Stream Deck + XL, 9×4) these 15 keys stay in the top left. The columns to
-their right pick a camera directly, one key per camera (12 on an XL, 16 on a + XL). The row below them recalls
-presets: 1–5 in PTZ and Picture modes, 13–16 in Presets mode, where STORE then one of those keys stores into it.
-This needs controller 0.21.0 or later; older controllers show the 15-key layout.
+On a larger deck (an XL, 8×4, or a Stream Deck + XL, 9×4) these 15 keys stay in the top left. The bottom row picks
+a camera directly, one key per camera, under the 15 keys. The columns to their right recall presets: 4 rows of 3 on an
+XL (4 of 4 on a + XL), presets 1 onwards in PTZ and Picture modes and 13–16 in Presets mode, where STORE then one of
+those keys stores into it. With more than 5 cameras the camera row runs the whole width and the presets keep the 3
+rows above it. This needs controller 0.21.0 or later; older controllers show the 15-key layout.
 
 Moves stop when the keys go to another module, when the deck changes size, when the selected camera changes and
 when the module stops.
