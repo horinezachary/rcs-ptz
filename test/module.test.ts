@@ -56,7 +56,7 @@ function entry(id: string, ports: SimPorts, protocol: Protocol = 'visca-udp', br
   return { id, name: `Cam ${id.slice(-1)}`, brand, protocol, host: '127.0.0.1', port: ports[PORT_OF[protocol]], video, invertPan: false, invertTilt: false, presetNames: [], webPort: 0 };
 }
 
-async function start(cameras: Entry[], extra: { allow?: boolean; state?: State; reason?: 'boot' | 'restore' | 'user'; rtmpPort?: number; bridge?: Config['bridge']; secrets?: Record<string, unknown> } = {}) {
+async function start(cameras: Entry[], extra: { allow?: boolean; state?: State; reason?: 'boot' | 'restore' | 'user'; rtmpPort?: number; bridge?: Config['bridge']; secrets?: Record<string, unknown>; deck?: { columns: number; rows: number } } = {}) {
   const config: Config = {
     cameras,
     allowControls: extra.allow ?? false,
@@ -64,7 +64,7 @@ async function start(cameras: Entry[], extra: { allow?: boolean; state?: State; 
     rtmpPort: extra.rtmpPort ?? (await freePort()),
     bridge: extra.bridge ?? { enabled: false, basePort: 8000, rtspPort: 8554, discovery: false }
   };
-  sim = await startTestModule(mod, { config, state: extra.state, reason: extra.reason, secrets: extra.secrets });
+  sim = await startTestModule(mod, { config, state: extra.state, reason: extra.reason, secrets: extra.secrets, deck: extra.deck });
   await sim.settle();
   await until(() => last()?.cameras?.length === cameras.length && last().cameras.every((c: any) => c.read && c.reachable), 6000, 'for the cameras');
   await sim.settle();
@@ -511,5 +511,38 @@ describe('pointing a camera’s own RTMP push at the unit', () => {
     await s.sendUi({ type: 'rtmp-point', id: '00000001', confirmed: true, from: 'web' });
     await s.settle();
     expect(s.notifications.at(-1)?.text).toMatch(/BirdDog/);
+  });
+});
+
+describe('a larger Stream Deck', () => {
+  it('keeps the 15 keys top left, picks cameras on the right and recalls presets below', async () => {
+    const a = await camera('A');
+    const b = await camera('B');
+    const s = await start([entry('0000000a', a.ports), entry('0000000b', b.ports)], { allow: true, deck: { columns: 8, rows: 4 } });
+    expect(s.keys).toHaveLength(32);
+    expect(s.keys[1]).toMatchObject({ label: '▲' });
+    expect(s.keys[20]).toMatchObject({ label: 'MODE' }); // block key 15 at column 5, row 3 of the deck
+    expect(s.keys[5]).toMatchObject({ label: 'CAM A', sublabel: 'SELECTED' });
+    expect(s.keys[6]).toMatchObject({ label: 'CAM B' });
+    expect(s.keys[24]).toMatchObject({ label: 'PRESET 1' });
+
+    await s.down(8); // ◀ at column 0, row 1
+    await until(() => a.c.vel.pan < 0, 2000, 'for the move');
+    await s.press(6); // camera B: the move on A stops
+    expect(s.state.cam).toBe('0000000b');
+    await until(() => a.c.vel.pan === 0, 2000, 'for the stop');
+    await s.up(8);
+    await s.press(25);
+    expect(moves(b.c)).toContain('recall 2');
+    expect(moves(a.c)).not.toContain('recall 2');
+
+    await s.down(1); // ▲ held while the deck changes: the move stops
+    await until(() => b.c.vel.tilt > 0, 2000, 'for the tilt');
+    await s.setDeck(5, 3);
+    await until(() => b.c.vel.tilt === 0, 2000, 'for the stop');
+    await s.settle();
+    expect(s.keys).toHaveLength(15);
+    expect(s.keys[KEY.MODE]).toMatchObject({ label: 'MODE' });
+    expect(s.keys[KEY.CAM]).toMatchObject({ label: 'CAM B' });
   });
 });

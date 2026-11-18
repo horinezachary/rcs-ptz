@@ -16,6 +16,10 @@
 // PRESETS mode: keys 1-12 recall presets 1-12, 13 HOME, 14 STORE (then a preset key), 15 MODE.
 // PICTURE mode: iris, gain, shutter, R gain, B gain (+ on top, − below), AE mode, WB mode, one push WB,
 //               focus auto/manual, MODE.
+//
+// On a larger deck (controller 0.21.0+) these 15 keys stay in the top left 5 × 3. The columns to their
+// right pick a camera directly, one key each. The rows below them recall presets: 1 onwards in PTZ and
+// PICTURE modes, 13 onwards in PRESETS mode (where STORE then a key stores there).
 
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
@@ -79,6 +83,39 @@ export const KEY = {
   DL: 10, DOWN: 11, DR: 12, SPEED: 13, MODE: 14,
   HOME: 12, STORE: 13
 } as const;
+export interface Grid {
+  columns: number;
+  rows: number;
+}
+
+/** The deck as the controller describes it. Older controllers send no size: 5 × 3. */
+export function grid(ctx: { host: { deck: { columns?: number; rows?: number } } }): Grid {
+  return { columns: ctx.host.deck.columns ?? 5, rows: ctx.host.deck.rows ?? 3 };
+}
+
+export interface Layout {
+  keys: number;
+  /** Deck key of each of the 15 KEY positions. */
+  block: number[];
+  /** Camera keys right of the block, in order. */
+  cameras: number[];
+  /** Preset keys below the block, in order. */
+  presets: number[];
+}
+
+/** Where everything goes on a deck of this size. On 5 × 3 it is the 15 KEY positions and nothing else. */
+export function layout(g: Grid): Layout {
+  const C = g.columns;
+  const block = Array.from({ length: 15 }, (_, i) => Math.floor(i / 5) * C + (i % 5));
+  const cameras: number[] = [];
+  const presets: number[] = [];
+  for (let d = 0; d < C * g.rows; d++) {
+    if (d % C >= 5) cameras.push(d);
+    else if (Math.floor(d / C) >= 3) presets.push(d);
+  }
+  return { keys: C * g.rows, block, cameras, presets };
+}
+
 const DIRS: Record<number, [number, number]> = { 0: [-1, 1], 1: [0, 1], 2: [1, 1], 5: [-1, 0], 7: [1, 0], 10: [-1, -1], 11: [0, -1], 12: [1, -1] };
 const SPEEDS: Record<Speed, number> = { slow: 0.25, medium: 0.55, fast: 1 };
 const FOCUS_SPEED = 0.45;
@@ -252,7 +289,7 @@ function param(cam: Camera | undefined, ids: string[]): Param | undefined {
   return cam?.view.picture.find((p) => ids.includes(p.id));
 }
 
-function keyFaces(ctx: C): KeySetParams[] {
+function blockFaces(ctx: C): KeySetParams[] {
   const c = cfg(ctx);
   const cam = current(ctx);
   const faces: KeySetParams[] = [];
@@ -324,6 +361,39 @@ function keyFaces(ctx: C): KeySetParams[] {
   faces.push(v && af ? { index: 13, label: 'FOCUS', sublabel: af.value === 'auto' ? 'AUTO' : 'MANUAL', ...(can ? { background: '#2A2440', color: ON } : {}) } : blank(13));
   faces.push(modeFace);
   return faces;
+}
+
+/** The 15 keys in their block, and on a larger deck the camera and preset keys around it. */
+function keyFaces(ctx: C): KeySetParams[] {
+  const L = layout(grid(ctx));
+  const faces = blockFaces(ctx).map((f) => ({ ...f, index: L.block[f.index]! }));
+  if (L.keys === 15) return faces;
+  const c = cfg(ctx);
+  const cam = current(ctx);
+  const list = [...(rt?.cameras.values() ?? [])];
+  L.cameras.forEach((index, i) => {
+    const x = list[i];
+    if (!x) return faces.push({ index });
+    const sel = x === cam;
+    const offline = !x.view.reachable;
+    faces.push({ index, label: short(x.view.name.toUpperCase(), 10), sublabel: offline ? 'offline' : sel ? 'SELECTED' : `CAMERA ${i + 1}`, ...(sel ? { background: ACTIVE, color: ON } : offline ? { background: '#5A1A1A', color: ON } : {}) });
+  });
+  const v = cam?.view;
+  const can = c.allowControls && !!v && v.reachable;
+  const storing = !!rt?.storeArmed;
+  const names = c.cameras.find((e) => e.id === v?.id)?.presetNames ?? [];
+  L.presets.forEach((index, i) => {
+    const n = extraPreset(ctx, i);
+    if (!v || n > PRESETS) return faces.push({ index });
+    const store = storing && keyMode(ctx) === 'presets';
+    faces.push({ index, label: short((names[n - 1] || `PRESET ${n}`).toUpperCase(), 10), sublabel: store ? 'STORE HERE' : names[n - 1] ? `PRESET ${n}` : '', ...(store ? { background: ARMED, color: '#FFE2B0' } : can ? { background: '#24324A', color: ON } : {}) });
+  });
+  return faces;
+}
+
+/** The preset on the i-th key below the block: 13 onwards in PRESETS mode (1-12 are in the block), else 1 onwards. */
+function extraPreset(ctx: C, i: number): number {
+  return (keyMode(ctx) === 'presets' ? 13 : 1) + i;
 }
 
 export async function draw(ctx: C, clientId?: string): Promise<void> {
@@ -951,6 +1021,21 @@ function uiMotion(m: any): Motion {
 }
 
 export default defineModule<State, Config>({
+  // Every key of a larger deck: camera and preset keys around the usual 15. Older controllers ignore
+  // this and send 15 keys.
+  fullDeck: true,
+
+  // The deck changed size: keys moved, so a held key may never come up. Stop the keys' move.
+  async deck(ctx) {
+    if (!rt) return;
+    rt.held.clear();
+    const cam = current(ctx);
+    if (cam) setMotion(ctx, cam.entry.id, 'keys', null);
+    disarmStore();
+    await ctx.keys.clear();
+    await draw(ctx);
+  },
+
   async start(ctx) {
     if (rt) {
       for (const c of rt.cameras.values()) c.stop();
@@ -1055,10 +1140,29 @@ export default defineModule<State, Config>({
     if (owned) await draw(ctx);
   },
 
-  async key(ctx, { index, action }) {
+  async key(ctx, { index: d, action }) {
     if (!rt) return;
     const mode = keyMode(ctx);
     const cam = current(ctx);
+    const L = layout(grid(ctx));
+    const index = L.block.indexOf(d);
+    if (index < 0) {
+      if (action !== 'down') return;
+      const c = L.cameras.indexOf(d);
+      if (c >= 0) {
+        const id = [...rt.cameras.keys()][c];
+        return id ? select(ctx, id) : undefined;
+      }
+      const p = L.presets.indexOf(d);
+      if (p < 0 || !cam) return;
+      const n = extraPreset(ctx, p);
+      if (n > PRESETS) return;
+      if (mode === 'presets' && rt.storeArmed) {
+        disarmStore();
+        await store(ctx, cam, n, 'the panel keys');
+      } else await recall(ctx, cam, n, 'the panel keys');
+      return draw(ctx);
+    }
     if (mode === 'ptz' && (DIRS[index] || index === KEY.ZOOM_IN || index === KEY.ZOOM_OUT || index === KEY.NEAR || index === KEY.FAR)) {
       if (action === 'up') {
         if (rt.held.delete(index)) keysMotion(ctx);
