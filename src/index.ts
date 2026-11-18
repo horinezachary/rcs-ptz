@@ -17,9 +17,11 @@
 // PICTURE mode: iris, gain, shutter, R gain, B gain (+ on top, − below), AE mode, WB mode, one push WB,
 //               focus auto/manual, MODE.
 //
-// On a larger deck (controller 0.21.0+) these 15 keys stay in the top left 5 × 3. The columns to their
-// right pick a camera directly, one key each. The rows below them recall presets: 1 onwards in PTZ and
-// PICTURE modes, 13 onwards in PRESETS mode (where STORE then a key stores there).
+// On a larger deck (controller 0.21.0+) these 15 keys stay in the top left 5 × 3. The bottom row picks a
+// camera directly, one key each, under the 15 keys. The columns to their right recall presets (4 rows of 3
+// on an XL): 1 onwards in PTZ and PICTURE modes, 13 onwards in PRESETS mode (where STORE then a key stores
+// there). With more cameras than fit under the 15 keys, the camera row runs the whole width and the
+// presets keep the rows above it.
 
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
@@ -97,23 +99,32 @@ export interface Layout {
   keys: number;
   /** Deck key of each of the 15 KEY positions. */
   block: number[];
-  /** Camera keys right of the block, in order. */
+  /** Camera keys on the bottom row, in order. */
   cameras: number[];
-  /** Preset keys below the block, in order. */
+  /** Preset keys right of the block, row by row. */
   presets: number[];
 }
 
-/** Where everything goes on a deck of this size. On 5 × 3 it is the 15 KEY positions and nothing else. */
-export function layout(g: Grid): Layout {
+/**
+ * Where everything goes on a deck of this size, for this many cameras. On 5 × 3 it is the 15 KEY
+ * positions and nothing else.
+ */
+export function layout(g: Grid, cameraCount = 0): Layout {
   const C = g.columns;
+  const keys = C * g.rows;
   const block = Array.from({ length: 15 }, (_, i) => Math.floor(i / 5) * C + (i % 5));
+  if (keys === 15) return { keys, block, cameras: [], presets: [] };
+  const bottom = keys - C;
+  // Cameras under the 15 keys; more than fit there take the whole bottom row.
+  const wide = cameraCount > 5 && g.rows > 3;
   const cameras: number[] = [];
   const presets: number[] = [];
-  for (let d = 0; d < C * g.rows; d++) {
-    if (d % C >= 5) cameras.push(d);
-    else if (Math.floor(d / C) >= 3) presets.push(d);
+  for (let d = 0; d < keys; d++) {
+    const column = d % C;
+    if (d >= bottom && g.rows > 3 && (column < 5 || wide)) cameras.push(d);
+    else if (column >= 5) presets.push(d);
   }
-  return { keys: C * g.rows, block, cameras, presets };
+  return { keys, block, cameras, presets };
 }
 
 const DIRS: Record<number, [number, number]> = { 0: [-1, 1], 1: [0, 1], 2: [1, 1], 5: [-1, 0], 7: [1, 0], 10: [-1, -1], 11: [0, -1], 12: [1, -1] };
@@ -365,7 +376,7 @@ function blockFaces(ctx: C): KeySetParams[] {
 
 /** The 15 keys in their block, and on a larger deck the camera and preset keys around it. */
 function keyFaces(ctx: C): KeySetParams[] {
-  const L = layout(grid(ctx));
+  const L = layout(grid(ctx), rt?.cameras.size ?? 0);
   const faces = blockFaces(ctx).map((f) => ({ ...f, index: L.block[f.index]! }));
   if (L.keys === 15) return faces;
   const c = cfg(ctx);
@@ -1146,7 +1157,7 @@ export default defineModule<State, Config>({
     if (!rt) return;
     const mode = keyMode(ctx);
     const cam = current(ctx);
-    const L = layout(grid(ctx));
+    const L = layout(grid(ctx), rt?.cameras.size ?? 0);
     const index = L.block.indexOf(d);
     if (index < 0) {
       if (action !== 'down') return;
