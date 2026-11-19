@@ -16,6 +16,12 @@ yet.**
 - **Setup**: add a camera by make and address, or scan the network; Allow controls; live video on the unit's own
   screen (every camera, the selected one, or none); the ONVIF bridge switch.
 
+On a 16:9 touchscreen (1920×1080) the selected camera's card on Cameras also has its 16 presets (tap to recall, or
+to store while STORE is armed; Allow controls as on Presets) and its exposure, iris, gain, shutter, white balance and
+focus, read only. Presets puts the selected camera's live picture beside a 4×4 grid of large tiles, and Picture
+puts it beside the settings, so a change can be seen where it is made (unless live video is Off in Setup). The
+1920×440 bar is unchanged.
+
 The web view has the same pages, plus everything the panel leaves out: ports, stream URLs and keys, camera logins,
 preset names, pan/tilt inversion, reordering, and the bridge's ports and login. Its Cameras page has its own
 selected camera and a D-pad you hold to move (it stops when you let go), so a second operator can drive a different
