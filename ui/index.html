@@ -76,6 +76,8 @@
       .pre .n { font-size: 18px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .pre .t { font: 700 11px var(--rcs-font); letter-spacing: 0.08em; color: var(--rcs-muted); }
       .pre.store { background: #3A2A0E; border-color: var(--rcs-accent); color: #FFE2B0; }
+      .pbody { display: contents; }
+      .livebox { display: none; }
 
       /* setup */
       .setup { flex: 1; min-height: 0; display: grid; grid-template-columns: 430px 1fr 470px; gap: 20px; }
@@ -93,6 +95,36 @@
 
       .toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #3A2A0E; border: 2px solid var(--rcs-accent); color: #FFE2B0;
         padding: 10px 20px; border-radius: 12px; font-size: 17px; font-weight: 600; white-space: nowrap; z-index: 50; }
+
+      /* A taller screen (fullPanel, 1824×1080); the 1920×440 bar above is untouched. Cameras: the side panel adds
+         the selected camera's presets and its main picture values. Presets: the live picture beside a 4×4 grid of
+         large tiles. Picture: the live picture beside the settings. */
+      @media (min-height: 700px) {
+        .cams { grid-template-columns: 1fr 440px; }
+        .side { gap: 10px; }
+        .side .pgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 64px; gap: 6px; }
+        .side .pre { padding: 6px 8px; border-radius: 10px; }
+        .side .pre .n { font-size: 14px; }
+        .side .pre .t { font-size: 10px; }
+        .side .kv.vals { flex: none; align-content: start; }
+        .side .kv.vals .v { font-family: var(--rcs-font); }
+        .side .pre .t { white-space: nowrap; }
+        #view-presets { flex: 1; }
+        .pbody { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; flex: 1; min-height: 0; }
+        .pbody .presets { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(4, minmax(0, 1fr)); }
+        .pbody .pre .n { font-size: 22px; }
+        .pbody .pre .t { font-size: 12px; }
+        .livebox { display: block; position: relative; align-self: start; aspect-ratio: 16 / 9; background: #050607; border: 2px solid var(--rcs-accent); border-radius: 10px; overflow: hidden; }
+        .livebox video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+        .livebox .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 0 16px; color: #8a8f98; font-size: 14px; }
+        .livebox .ov { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; font: 700 16px var(--rcs-font); color: #fff; background: linear-gradient(rgba(0,0,0,0.65), transparent); }
+        .pic.tall { columns: auto; display: grid; grid-template-columns: 960px minmax(0, 1fr); gap: 24px; }
+        .pic.tall > * { margin-bottom: 0; }
+        .pic.tall .pcols { min-height: 0; columns: 220px 4; column-gap: 28px; column-fill: auto; column-rule: 1px solid var(--rcs-border); }
+        .pic.tall .pcols > * { break-inside: avoid; margin-bottom: 10px; }
+        .pic.tall .pcols .gh { display: block; break-after: avoid; margin-bottom: 6px; color: var(--rcs-accent); }
+        .pic.tall .pcols .gh:not(:first-child) { margin-top: 6px; }
+      }
     </style>
   </head>
   <body>
@@ -128,7 +160,7 @@
           <button class="btn" id="home">HOME</button>
           <button class="btn" id="store">STORE</button>
         </div>
-        <div class="presets" id="presetGrid"></div>
+        <div class="pbody"><div class="livebox" id="presetLive"></div><div class="presets" id="presetGrid"></div></div>
       </section>
 
       <section id="view-setup" class="setup" hidden>
@@ -175,6 +207,7 @@
       let onYes = null;
       const video = createVideo(rcs);
       const tiles = new Map();
+      draw.pic = '';
 
       function el(tag, attrs = {}, text) {
         const e = document.createElement(tag);
@@ -196,6 +229,7 @@
       const cur = () => s?.cameras.find((c) => c.id === s.current);
       const entry = (id) => s?.entries.find((e) => e.id === id);
       const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toFixed(d));
+      const tall = () => window.innerHeight >= 700;
 
       function draw() {
         if (!s) return;
@@ -216,8 +250,14 @@
         drawTabs();
         if (!none) ({ cameras: drawCameras, picture: drawPicture, presets: drawPresets, setup: drawSetup })[v]();
         // Which pictures this panel shows (the Pi decodes each one): Setup decides.
-        const shown = v === 'cameras' && !none ? (s.liveVideo === 'all' ? s.cameras.map((x) => x.id) : s.liveVideo === 'selected' && c ? [c.id] : []) : [];
+        // Tall Presets and Picture show the selected camera's picture too (unless Setup says Off).
+        const one = tall() && (v === 'presets' || v === 'picture') && s.liveVideo !== 'off' && c ? [c.id] : [];
+        const shown = v === 'cameras' && !none ? (s.liveVideo === 'all' ? s.cameras.map((x) => x.id) : s.liveVideo === 'selected' && c ? [c.id] : []) : one;
         video.want(shown);
+        // A tall Cameras view lists the selected camera's picture values, so ask the module to read them (the
+        // same read the web view's Picture page asks for; nothing is sent to the camera but reads).
+        const pic = tall() && v === 'cameras' && !none && c ? c.id : '';
+        if (pic !== draw.pic) { draw.pic = pic; rcs.send({ type: 'picture-of', id: pic }); }
         const t = $('toast');
         t.hidden = !s.storeArmed;
         if (s.storeArmed) t.textContent = 'Tap a preset (or press a preset key) to store the camera’s position there';
@@ -273,8 +313,13 @@
           const mo = c.motion || {};
           t.root.className = 'tile' + (c.id === s.current ? ' sel' : '') + (mo.pan || mo.tilt || mo.zoom || mo.focus ? ' moving' : '');
           const showVideo = want.includes(c.id) && c.stream.live;
-          if (showVideo && !t.vid) { t.vid = video.element(c.id); t.root.prepend(t.vid); }
-          if (!showVideo && t.vid) { t.vid.remove(); t.vid = null; }
+          // The camera's <video> is new after its player was closed (another view wanted no video), and the tall
+          // Presets and Picture views borrow it; either way put the current one back in the tile.
+          if (showVideo) {
+            const v = video.element(c.id);
+            if (t.vid !== v || v.parentNode !== t.root) { if (t.vid?.parentNode === t.root) t.vid.remove(); t.vid = v; t.root.prepend(v); }
+          }
+          if (!showVideo && t.vid) { if (t.vid.parentNode === t.root) t.vid.remove(); t.vid = null; }
           t.msg.textContent = showVideo ? '' : !want.includes(c.id) ? 'Live video is off on this panel (Setup)' : c.videoMode === 'none' ? 'No video set up' : c.stream.codec ? `${c.stream.codec}: only H.264 can be shown` : c.stream.error || (c.videoMode === 'push' ? 'Waiting for the camera to push RTMP' : 'Connecting to the stream…');
           t.top.replaceChildren(el('span', { class: 'dot ' + (c.reachable ? 'ok' : 'critical'), style: `--sev: var(--rcs-${c.reachable ? 'ok' : 'error'})` }), el('span', { class: 'nm' }, c.name));
           if (c.id === s.current) t.top.append(el('span', { class: 'tag sel' }, 'SELECTED'));
@@ -313,6 +358,47 @@
         af.onclick = () => rcs.send({ type: 'set', id: c.id, param: 'focus', value: c.status?.focusAuto ? 'manual' : 'auto' });
         row.append(home, af);
         side.append(row);
+        if (tall()) sideTall(side, c, e, live);
+      }
+
+      // Tall side panel: the selected camera's presets (tap recalls, or stores while STORE is armed, as on the
+      // Presets view, and only with Allow controls) and its main picture values, read only.
+      const MAIN = [['Exposure', ['ae', 'exposureMode']], ['Iris', ['iris', 'irisAuto']], ['Gain', ['gain']], ['Shutter', ['shutter', 'exposureTime']], ['White bal.', ['wb', 'wbMode']], ['Focus', ['af', 'focus']]];
+      function sideTall(side, c, e, live) {
+        side.append(el('span', { class: 'label', style: 'margin-top: 6px' }, s.storeArmed ? 'PRESETS · TAP TO STORE' : 'PRESETS'));
+        const g = el('div', { class: 'pgrid' });
+        for (let n = 1; n <= 16; n++) g.append(presetButton(c, e, n, live, true));
+        side.append(g);
+        side.append(el('span', { class: 'label', style: 'margin-top: 6px' }, 'PICTURE'));
+        const kv = el('div', { class: 'kv vals' });
+        let any = false;
+        for (const [label, ids] of MAIN) {
+          const p = ids.map((id) => c.picture.find((x) => x.id === id && x.kind !== 'action' && (x.text ?? x.value) != null)).find(Boolean);
+          if (!p) continue;
+          any = true;
+          kv.append(el('span', { class: 'k' }, label), el('span', { class: 'v' }, p.text ?? String(p.value)));
+        }
+        side.append(any ? kv : el('span', { class: 'note' }, c.reachable ? 'Reading the camera’s picture settings…' : `${c.name} is not answering`));
+      }
+
+      function presetButton(c, e, n, live, small) {
+        const name = e?.presetNames[n - 1];
+        const b = el('button', { class: 'pre' + (s.storeArmed ? ' store' : '') });
+        const tag = s.storeArmed ? (small ? 'STORE' : 'STORE HERE') : small ? (n <= 12 ? `KEY ${n}` : '') : `PRESET ${n}${n <= 12 ? ` · KEY ${n}` : ''}`;
+        b.append(el('span', { class: 'n' }, name || `Preset ${n}`), el('span', { class: 't' }, tag));
+        b.disabled = !live;
+        b.onclick = () => rcs.send({ type: s.storeArmed ? 'store' : 'recall', id: c.id, n });
+        return b;
+      }
+
+      /** The selected camera's live picture in a box (tall Presets and Picture views). */
+      function liveBox(box, c) {
+        box.replaceChildren();
+        const msg = el('div', { class: 'msg' });
+        const show = s.liveVideo !== 'off' && c.stream.live;
+        if (show) box.append(video.element(c.id));
+        msg.textContent = show ? '' : s.liveVideo === 'off' ? 'Live video is off on this panel (Setup)' : c.videoMode === 'none' ? 'No video set up' : c.stream.error || 'No picture yet';
+        box.append(msg, el('div', { class: 'ov' }, c.name));
       }
 
       function paramRow(c, p) {
@@ -360,11 +446,19 @@
           box.append(el('div', { class: 'note' }, c.reachable ? 'Reading the camera’s picture settings…' : `${c.name} is not answering`));
           return;
         }
+        box.classList.toggle('tall', tall());
+        let into = box;
+        if (tall()) {
+          const lv = el('div', { class: 'livebox' });
+          liveBox(lv, c);
+          into = el('div', { class: 'pcols' });
+          box.append(lv, into);
+        }
         for (const [g, label] of GROUPS) {
           const ps = c.picture.filter((p) => p.group === g);
           if (!ps.length) continue;
-          box.append(el('span', { class: 'label gh' }, label));
-          for (const p of ps) box.append(paramRow(c, p));
+          into.append(el('span', { class: 'label gh' }, label));
+          for (const p of ps) into.append(paramRow(c, p));
         }
       }
 
@@ -378,14 +472,9 @@
         $('store').classList.toggle('armed', s.storeArmed);
         const g = $('presetGrid');
         g.replaceChildren();
-        for (let n = 1; n <= 16; n++) {
-          const name = e?.presetNames[n - 1];
-          const b = el('button', { class: 'pre' + (s.storeArmed ? ' store' : '') });
-          b.append(el('span', { class: 'n' }, name || `Preset ${n}`), el('span', { class: 't' }, s.storeArmed ? 'STORE HERE' : `PRESET ${n}${n <= 12 ? ` · KEY ${n}` : ''}`));
-          b.disabled = !live;
-          b.onclick = () => rcs.send({ type: s.storeArmed ? 'store' : 'recall', id: c.id, n });
-          g.append(b);
-        }
+        for (let n = 1; n <= 16; n++) g.append(presetButton(c, e, n, live));
+        if (tall() && c) liveBox($('presetLive'), c);
+        else $('presetLive').replaceChildren();
       }
 
       function drawSetup() {
